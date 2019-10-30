@@ -33,7 +33,7 @@ _STEPS = {}
 _BROADCASTS = {}
 _INJECTABLES = {}
 
-_USE_VERSIONING = False
+_USE_VERSIONING = True
 _CACHING = True
 _TABLE_CACHE = {}
 _COLUMN_CACHE = {}
@@ -630,7 +630,7 @@ class _ColumnFuncWrapper(object):
         for dep in dependencies:
             self.dependencies[dep] = -1
         self.version = 0
-    
+
     def __call__(self):
         """
         Evaluate the wrapped function and return the result.
@@ -642,15 +642,11 @@ class _ColumnFuncWrapper(object):
         if _USE_VERSIONING:
             use_cached = use_cached and (not need_to_recompute(
                     self.dependencies))
-                
-        #if (_CACHING and
-        #        self.cache and
-        #        (self.table_name, self.name) in _COLUMN_CACHE):
-        
+
         if use_cached:
             logger.debug(
                 'returning column {!r} for table {!r} from cache'.format(
-                    self.name, self.table_name))        
+                    self.name, self.table_name))
             return _COLUMN_CACHE[(self.table_name, self.name)].value
 
         with log_start_finish(
@@ -667,7 +663,7 @@ class _ColumnFuncWrapper(object):
                         depcol = _LOCAL_COLUMNS[key]
                     else:
                         depcol = _COLUMNS[key]
-                    self.dependencies[key] = depcol.version  
+                    self.dependencies[key] = depcol.version
 
         if self.cache:
             _COLUMN_CACHE[(self.table_name, self.name)] = CacheItem(
@@ -707,7 +703,7 @@ class _LocalSeriesWrapper(object):
         self.name = column_name
         self.version = 0
         self.dependencies = {}
-        
+
 class _SeriesWrapper(object):
     """
     Wrap a Series for the purpose of giving it the same interface as a
