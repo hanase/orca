@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 
 _TABLES = {}
 _COLUMNS = {}
+_LOCAL_COLUMNS = {}
 _STEPS = {}
 _BROADCASTS = {}
 _INJECTABLES = {}
 
+_USE_VERSIONING = False
 _CACHING = True
 _TABLE_CACHE = {}
 _COLUMN_CACHE = {}
@@ -168,6 +170,8 @@ class DataFrameWrapper(object):
         self.name = name
         self.local = frame
         self.copy_col = copy_col
+        for col in frame.columns:
+            _LOCAL_COLUMNS[(name, col)] = _LocalSeriesWrapper(name, col)
 
     @property
     def columns(self):
@@ -349,6 +353,11 @@ class DataFrameWrapper(object):
                 raise ValueError(err_msg)
 
         self.local.loc[series.index, column_name] = series
+        key = (self.name, column_name)
+        if key in _LOCAL_COLUMNS.keys():
+            _LOCAL_COLUMNS[key].version = _LOCAL_COLUMNS[key].version + 1
+        else:
+            _COLUMNS[key].version = _COLUMNS[key] + 1
 
     def __len__(self):
         return len(self.local)
@@ -610,25 +619,38 @@ class _ColumnFuncWrapper(object):
     """
     def __init__(
             self, table_name, column_name, func, cache=False,
-            cache_scope=_CS_FOREVER):
+            cache_scope=_CS_FOREVER, dependencies = []):
         self.table_name = table_name
         self.name = column_name
         self._func = func
         self._argspec = getargspec(func)
         self.cache = cache
         self.cache_scope = cache_scope
-
+        self.dependencies = {}
+        for dep in dependencies:
+            self.dependencies[dep] = -1
+        self.version = 0
+    
     def __call__(self):
         """
         Evaluate the wrapped function and return the result.
 
         """
-        if (_CACHING and
+        use_cached = (_CACHING and
                 self.cache and
-                (self.table_name, self.name) in _COLUMN_CACHE):
+                (self.table_name, self.name) in _COLUMN_CACHE)
+        if _USE_VERSIONING:
+            use_cached = use_cached and (not need_to_recompute(
+                    self.dependencies))
+                
+        #if (_CACHING and
+        #        self.cache and
+        #        (self.table_name, self.name) in _COLUMN_CACHE):
+        
+        if use_cached:
             logger.debug(
                 'returning column {!r} for table {!r} from cache'.format(
-                    self.name, self.table_name))
+                    self.name, self.table_name))        
             return _COLUMN_CACHE[(self.table_name, self.name)].value
 
         with log_start_finish(
@@ -637,6 +659,15 @@ class _ColumnFuncWrapper(object):
             kwargs = _collect_variables(names=self._argspec.args,
                                         expressions=self._argspec.defaults)
             col = self._func(**kwargs)
+            if _USE_VERSIONING:
+                self.version = self.version + 1
+                logger.debug("Version for {!r}.{!r}: {!r}".format(self.table_name, self.name, self.version))
+                for key, version in self.dependencies.iteritems():
+                    if key in _LOCAL_COLUMNS.keys():
+                        depcol = _LOCAL_COLUMNS[key]
+                    else:
+                        depcol = _COLUMNS[key]
+                    self.dependencies[key] = depcol.version  
 
         if self.cache:
             _COLUMN_CACHE[(self.table_name, self.name)] = CacheItem(
@@ -670,7 +701,13 @@ class _ColumnFuncWrapper(object):
         """
         return utils.func_source_data(self._func)
 
-
+class _LocalSeriesWrapper(object):
+    def __init__(self, table_name, column_name):
+        self.table_name = table_name
+        self.name = column_name
+        self.version = 0
+        self.dependencies = {}
+        
 class _SeriesWrapper(object):
     """
     Wrap a Series for the purpose of giving it the same interface as a
@@ -697,6 +734,7 @@ class _SeriesWrapper(object):
         self.table_name = table_name
         self.name = column_name
         self._column = series
+        self.version = 0
 
     def __call__(self):
         return self._column
@@ -1099,7 +1137,7 @@ def table_type(table_name):
 
 
 def add_column(
-        table_name, column_name, column, cache=False, cache_scope=_CS_FOREVER):
+        table_name, column_name, column, cache=False, cache_scope=_CS_FOREVER, **kwargs):
     """
     Add a new column to a table from a Series or callable.
 
@@ -1129,7 +1167,7 @@ def add_column(
         column = \
             _ColumnFuncWrapper(
                 table_name, column_name, column,
-                cache=cache, cache_scope=cache_scope)
+                cache=cache, cache_scope=cache_scope, **kwargs)
     else:
         column = _SeriesWrapper(table_name, column_name, column)
 
@@ -1143,7 +1181,7 @@ def add_column(
     return column
 
 
-def column(table_name, column_name=None, cache=False, cache_scope=_CS_FOREVER):
+def column(table_name, column_name=None, cache=False, cache_scope=_CS_FOREVER, **kwargs):
     """
     Decorates functions that return a Series.
 
@@ -1164,7 +1202,7 @@ def column(table_name, column_name=None, cache=False, cache_scope=_CS_FOREVER):
         else:
             name = func.__name__
         add_column(
-            table_name, name, func, cache=cache, cache_scope=cache_scope)
+            table_name, name, func, cache=cache, cache_scope=cache_scope, **kwargs)
         return func
     return decorator
 
@@ -2095,3 +2133,16 @@ def eval_step(name, **kwargs):
     """
     with injectables(**kwargs):
         return get_step(name)()
+
+def need_to_recompute(deps):
+    recompute = False
+    for key, version in deps.iteritems():
+        if key in _LOCAL_COLUMNS.keys():
+            depcol = _LOCAL_COLUMNS[key]
+        else:
+            depcol = _COLUMNS[key]
+        if len(depcol.dependencies) > 0:
+            recompute = need_to_recompute(depcol.dependencies)
+        if recompute or version < 0 or depcol.version > version:
+            return True
+    return recompute
