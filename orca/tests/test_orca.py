@@ -338,11 +338,14 @@ def test_column_dtree_cache(df):
         return orca.get_table("table1").b + orca.get_table("table2").x.sum()
     
     @orca.column('table1', 'd', cache = True, cache_scope = 'dtree',
-                 dependencies = ['table1.b', 'table2.y'])
+                 dependencies = ['table1.b', 'table2.y'
+                                 #, 'inj1'
+                                 ])
     def d():
         return orca.get_table("table1").b + orca.get_table("table2").y.sum()    
     
     tbl1 = orca.get_table("table1")
+    orca.add_injectable('inj1', -10)
     
     # first call
     first_c = tbl1.c

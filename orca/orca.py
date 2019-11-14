@@ -255,7 +255,7 @@ class DataFrameWrapper(object):
         logger.debug('updating column {!r} in table {!r}'.format(
             column_name, self.name))
         self.local[column_name] = series
-        self.increment_version(column_name)
+        increment_node_version((self.name, column_name))
 
     def __setitem__(self, key, value):
         return self.update_col(key, value)
@@ -354,7 +354,7 @@ class DataFrameWrapper(object):
                 raise ValueError(err_msg)
 
         self.local.loc[series.index, column_name] = series
-        self.increment_version(column_name)
+        increment_node_version((self.name, column_name))
 
     def __len__(self):
         return len(self.local)
@@ -368,13 +368,7 @@ class DataFrameWrapper(object):
         for col in _columns_for_table(self.name).values():
             col.clear_cached()
         logger.debug('cleared cached columns for table {!r}'.format(self.name))
-
-    def increment_version(self, column_name):
-        key = (self.name, column_name)
-        if key in _LOCAL_COLUMNS.keys():
-            _LOCAL_COLUMNS[key].version = _LOCAL_COLUMNS[key].version + 1
-        else:
-            _COLUMNS[key].version = _COLUMNS[key] + 1        
+   
 
 class TableFuncWrapper(object):
     """
@@ -388,11 +382,11 @@ class TableFuncWrapper(object):
         Callable that returns a DataFrame.
     cache : bool, optional
         Whether to cache the results of calling the wrapped function.
-    cache_scope : {'step', 'iteration', 'forever'}, optional
+    cache_scope : {'step', 'iteration', 'forever', 'dtree'}, optional
         Scope for which to cache data. Default is to cache forever
         (or until manually cleared). 'iteration' caches data for each
         complete iteration of the pipeline, 'step' caches data for
-        a single step of the pipeline.
+        a single step of the pipeline. 'dtree' uses a dependencies graph.
     copy_col : bool, optional
         Whether to return copies when evaluating columns.
 
@@ -408,7 +402,7 @@ class TableFuncWrapper(object):
     """
     def __init__(
             self, name, func, cache=False, cache_scope=_CS_FOREVER,
-            copy_col=True):
+            copy_col=True, dependencies = []):
         self.name = name
         self._func = func
         self._argspec = getargspec(func)
@@ -418,6 +412,15 @@ class TableFuncWrapper(object):
         self._columns = []
         self._index = None
         self._len = 0
+        self.dependencies = {}
+        for dep in dependencies:
+            if is_expression(dep):
+                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
+            else:
+                key = dep
+            # initialize list of recorded versions with -1
+            self.dependencies[key] = -1
+        self.version = 0        
 
     @property
     def columns(self):
@@ -457,7 +460,12 @@ class TableFuncWrapper(object):
         Also updates attributes like columns, index, and length.
 
         """
-        if _CACHING and self.cache and self.name in _TABLE_CACHE:
+        use_cached = _CACHING and self.cache and self.name in _TABLE_CACHE
+        
+        if self.cache_scope == _CS_DTREE:
+            use_cached = use_cached and (not need_to_recompute(self.dependencies))
+            
+        if use_cached:
             logger.debug('returning table {!r} from cache'.format(self.name))
             return _TABLE_CACHE[self.name].value
 
@@ -468,7 +476,9 @@ class TableFuncWrapper(object):
             kwargs = _collect_variables(names=self._argspec.args,
                                         expressions=self._argspec.defaults)
             frame = self._func(**kwargs)
-
+            self.version = self.version + 1
+            record_versions_of_dependents(self)
+                
         self._columns = list(frame.columns)
         self._index = frame.index
         self._len = len(frame)
@@ -631,11 +641,10 @@ class _ColumnFuncWrapper(object):
         self.cache_scope = cache_scope
         self.dependencies = {}
         for dep in dependencies:
-            # convert into a tuple (dataset, column_name)
-            if not is_expression(dep):
-                raise TypeError("dependencies for {}.{} should be of type 'dataset.column_name', but it is {!r}".format(
-                    self.table_name, self.name, dep))
-            key = tuple(dep.split("."))
+            if is_expression(dep):
+                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
+            else:
+                key = dep
             # initialize list of recorded version with -1
             self.dependencies[key] = -1
         self.version = 0
@@ -665,13 +674,7 @@ class _ColumnFuncWrapper(object):
             col = self._func(**kwargs)
             # increase version and record versions of dependents
             self.version = self.version + 1
-            logger.debug("Version for {!r}.{!r}: {!r}".format(self.table_name, self.name, self.version))
-            for key, version in self.dependencies.iteritems():
-                if key in _LOCAL_COLUMNS.keys():
-                    depcol = _LOCAL_COLUMNS[key]
-                else:
-                    depcol = _COLUMNS[key]
-                self.dependencies[key] = depcol.version
+            record_versions_of_dependents(self)
 
         if self.cache:
             _COLUMN_CACHE[(self.table_name, self.name)] = CacheItem(
@@ -739,6 +742,7 @@ class _SeriesWrapper(object):
         self.name = column_name
         self._column = series
         self.version = 0
+        self.dependencies = {}
 
     def __call__(self):
         return self._column
@@ -775,15 +779,27 @@ class _InjectableFuncWrapper(object):
         Whether caching is enabled for this injectable function.
 
     """
-    def __init__(self, name, func, cache=False, cache_scope=_CS_FOREVER):
+    def __init__(self, name, func, cache=False, cache_scope=_CS_FOREVER, dependencies = []):
         self.name = name
         self._func = func
         self._argspec = getargspec(func)
         self.cache = cache
         self.cache_scope = cache_scope
+        self.dependencies = {}
+        for dep in dependencies:            
+            if is_expression(dep):
+                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
+            else:
+                key = dep
+            # initialize list of recorded versions with -1
+            self.dependencies[key] = -1
+        self.version = 0        
 
     def __call__(self):
-        if _CACHING and self.cache and self.name in _INJECTABLE_CACHE:
+        use_cached = _CACHING and self.cache and self.name in _INJECTABLE_CACHE
+        if self.cache_scope == _CS_DTREE:
+            use_cached = use_cached and (not need_to_recompute(self.dependencies))
+        if use_cached:
             logger.debug(
                 'returning injectable {!r} from cache'.format(self.name))
             return _INJECTABLE_CACHE[self.name].value
@@ -794,7 +810,9 @@ class _InjectableFuncWrapper(object):
             kwargs = _collect_variables(names=self._argspec.args,
                                         expressions=self._argspec.defaults)
             result = self._func(**kwargs)
-
+            self.version = self.version + 1
+            record_versions_of_dependents(self)
+            
         if self.cache:
             _INJECTABLE_CACHE[self.name] = CacheItem(
                 self.name, result, self.cache_scope)
@@ -2145,7 +2163,7 @@ def need_to_recompute(deps):
     
     Parameters
     ----------
-    deps : list
+    deps : dictionary
         Dictionary of the form {(dataset, column_name): version}
         
     Returns
@@ -2155,12 +2173,23 @@ def need_to_recompute(deps):
     """
     recompute = False
     for key, version in deps.iteritems():
-        if key in _LOCAL_COLUMNS.keys():
-            depcol = _LOCAL_COLUMNS[key]
-        else:
-            depcol = _COLUMNS[key]
-        if len(depcol.dependencies) > 0:
-            recompute = need_to_recompute(depcol.dependencies)
-        if recompute or version < 0 or depcol.version > version:
+        node = get_deptree_node(key)
+        if len(node.dependencies) > 0:
+            recompute = need_to_recompute(node.dependencies)
+        if recompute or version < 0 or node.version > version:
             return True
     return recompute
+
+def increment_node_version(key):
+    node = get_deptree_node(key)
+    node.version = node.version + 1
+
+def get_deptree_node(key):
+    for d in (_LOCAL_COLUMNS, _COLUMNS, _TABLES, _INJECTABLES):
+        if key in d.keys():
+            return d[key]
+    return None
+
+def record_versions_of_dependents(obj):
+    for key, _ in obj.dependencies.iteritems():
+        obj.dependencies[key] = get_deptree_node(key).version
