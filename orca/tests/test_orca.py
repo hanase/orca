@@ -321,63 +321,6 @@ def test_column_cache(df):
     pdt.assert_series_equal(c()(), series * 5)
     orca.add_column(*key, column=column, cache=True)
     pdt.assert_series_equal(c()(), series * 6)
-
-def test_column_dtree_cache(df):
-    series = pd.Series([4, 5, 6], index=['x', 'y', 'z'])
-                       
-    orca.add_table('table1', df)
-    orca.add_table('table2', 
-                   pd.DataFrame(
-                       [[10, 100], [20, 200], [30, 300], [40, 400]], columns=['x', 'y'],
-                       index=['aa', 'bb', 'cc', 'dd'])
-                   )
-    
-    @orca.column('table1', 'c', cache = True, cache_scope = 'dtree',
-                 dependencies = ['table1.b', 'table2.x'])
-    def c():
-        return orca.get_table("table1").b + orca.get_table("table2").x.sum()
-    
-    @orca.column('table1', 'd', cache = True, cache_scope = 'dtree',
-                 dependencies = ['table1.b', 'table2.y', 'inj'])
-    def d():
-        return orca.get_table("table1").b + orca.get_table("table2").y.sum() + orca.get_injectable("inj").sum()
-    
-    @orca.injectable('inj', cache=True, cache_scope='dtree', dependencies = ["table1.a"])
-    def inj():
-        return orca.get_table("table1").a*50
-        
-    tbl1 = orca.get_table("table1")
-    tbl2 = orca.get_table("table2")
-    
-    # first call
-    first_c = tbl1.c
-    first_d = tbl1.d
-    pdt.assert_series_equal(first_c, series + 100, check_names = False)
-    assert orca.get_raw_column('table1', 'c').version == 1
-    
-    # second call (no change to first call)
-    second_c = tbl1.c
-    second_d = tbl1.d
-    pdt.assert_series_equal(first_c, second_c)
-    assert orca.get_raw_column('table1', 'c').version == 1 # no recomputing happened
-    assert orca.get_raw_column('table1', 'd').version == 1
-    
-    # make change in dependency of table1.c using update_col    
-    tbl2.update_col('x', tbl2.x * 2)
-    
-    # third call
-    third_c = tbl1.c
-    pdt.assert_series_equal(third_c, series + 200, check_names = False)
-    assert orca.get_raw_column('table1', 'c').version == 2 # values of c recomputed
-    assert orca.get_raw_column('table1', 'd').version == 1 # but not d 
-    assert orca.get_raw_injectable('inj').version == 1 # and not injectable
-    
-    # make change in dependency of table1.d using update_col_from_series
-    tbl1.update_col_from_series('a', tbl1.a * 2)
-    pdt.assert_series_equal(tbl1.d, series + 1600, check_names = False)
-    assert orca.get_raw_column('table1', 'd').version == 2 # values of d recomputed
-    assert orca.get_raw_injectable('inj').version == 2 # as well as injectable
-    assert orca.get_raw_column('table1', 'c').version == 2 # but not c
     
 def test_column_cache_disabled(df):
     orca.add_injectable('x', 2)
@@ -1316,3 +1259,76 @@ def test_get_injectable_func_source_data():
     assert filename.endswith('test_orca.py')
     assert isinstance(lineno, int)
     assert 'def inj2()' in source
+
+def test_dtree_cache(df):
+    series = pd.Series([4, 5, 6], index=['x', 'y', 'z'])
+                       
+    orca.add_table('table1', df)
+    orca.add_table('table2', 
+                   pd.DataFrame(
+                       [[10, 100], [20, 200], [30, 300], [40, 400]], columns=['x', 'y'],
+                       index=['aa', 'bb', 'cc', 'dd'])
+                   )
+    
+    @orca.column('table1', 'c', cache = True, cache_scope = 'dtree',
+                 dependencies = ['table1.b', 'table2.x'])
+    def c():
+        return orca.get_table("table1").b + orca.get_table("table2").x.sum()
+    
+    @orca.column('table1', 'd', cache = True, cache_scope = 'dtree',
+                 dependencies = ['table1.b', 'table2.y', 'inj'])
+    def d():
+        return orca.get_table("table1").b + orca.get_table("table2").y.sum() + orca.get_injectable("inj").sum()
+    
+    @orca.injectable('inj', cache=True, cache_scope='dtree', dependencies = ["table1.a"])
+    def inj():
+        return orca.get_table("table1").a*50
+        
+    def table_func():
+        return pd.DataFrame({'o': orca.get_table("table2").x, 'p': [inj().sum()]*4, 'q': [orca.get_table("table1").c.sum()]*4})
+    
+    orca.add_table('tablef', table_func, cache = True, cache_scope = 'dtree', dependencies = ['table2', 'table1.c', 'inj'])
+    
+    tbl1 = orca.get_table("table1")
+    tbl2 = orca.get_table("table2")
+    tbl3 = orca.get_table("tablef")
+    
+    # first call
+    first_c = tbl1.c
+    first_d = tbl1.d
+    pdt.assert_series_equal(first_c, series + 100, check_names = False)
+    assert orca.get_raw_column('table1', 'c').version == 1
+    
+    # second call (no change to first call)
+    second_c = tbl1.c
+    second_d = tbl1.d
+    pdt.assert_series_equal(first_c, second_c)
+    assert orca.get_raw_column('table1', 'c').version == 1 # no recomputing happened
+    assert orca.get_raw_column('table1', 'd').version == 1
+    
+    # make change in dependency of table1.c using update_col    
+    tbl2.update_col('x', tbl2.x * 2)
+    
+    # third call
+    third_c = tbl1.c
+    pdt.assert_series_equal(third_c, series + 200, check_names = False)
+    assert orca.get_raw_column('table1', 'c').version == 2 # values of c recomputed
+    assert orca.get_raw_column('table1', 'd').version == 1 # but not d 
+    assert orca.get_raw_injectable('inj').version == 1 # and not injectable
+    
+    # make change in dependency of table1.d using update_col_from_series
+    tbl1.update_col_from_series('a', tbl1.a * 2)
+    pdt.assert_series_equal(tbl1.d, series + 1600, check_names = False)
+    assert orca.get_raw_column('table1', 'd').version == 2 # values of d recomputed
+    assert orca.get_raw_injectable('inj').version == 2 # as well as injectable
+    assert orca.get_raw_column('table1', 'c').version == 2 # but not c
+    
+    # table dependencies
+    assert orca.get_raw_table('tablef').version == 1
+    pdt.assert_series_equal(orca.get_table("tablef").o, tbl2.x, check_names = False)
+    assert orca.get_raw_table('tablef').version == 2 # the above call triggered new computation
+    tbl2.update_col('x', tbl2.x * 2) # triggers computing table1.c and tablef.q
+    assert orca.get_table("tablef").q[0], (series + 400).sum()
+    assert orca.get_raw_table('tablef').version == 3
+    assert orca.get_table("tablef").p[0] == 600
+    assert orca.get_raw_table('tablef').version == 3 # no recomputing

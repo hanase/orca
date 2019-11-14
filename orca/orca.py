@@ -389,6 +389,10 @@ class TableFuncWrapper(object):
         a single step of the pipeline. 'dtree' uses a dependencies graph.
     copy_col : bool, optional
         Whether to return copies when evaluating columns.
+    dependencies: list, optional
+        List of explicit dependencies (columns, tables, injectables)
+        to be used if cache_scope = 'dtree'. Columns are of the form 
+        'table.column_name'.
 
     Attributes
     ----------
@@ -412,16 +416,11 @@ class TableFuncWrapper(object):
         self._columns = []
         self._index = None
         self._len = 0
-        self.dependencies = {}
-        for dep in dependencies:
-            if is_expression(dep):
-                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
-            else:
-                key = dep
-            # initialize list of recorded versions with -1
-            self.dependencies[key] = -1
-        self.version = 0        
+        self.version = 0
+        # dict that records last seen versions of the dependencies 
+        self.dependencies = init_dependencies(dependencies) 
 
+     
     @property
     def columns(self):
         """
@@ -619,6 +618,10 @@ class _ColumnFuncWrapper(object):
         (or until manually cleared). 'iteration' caches data for each
         complete iteration of the pipeline, 'step' caches data for
         a single step of the pipeline. 'dtree' uses a dependencies graph.
+    dependencies: list, optional
+        List of explicit dependencies (columns, tables, injectables)
+        to be used if cache_scope = 'dtree'. Columns are of the form 
+        'table.column_name'.
 
     Attributes
     ----------
@@ -639,15 +642,9 @@ class _ColumnFuncWrapper(object):
         self._argspec = getargspec(func)
         self.cache = cache
         self.cache_scope = cache_scope
-        self.dependencies = {}
-        for dep in dependencies:
-            if is_expression(dep):
-                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
-            else:
-                key = dep
-            # initialize list of recorded version with -1
-            self.dependencies[key] = -1
         self.version = 0
+        # dict that records last seen versions of the dependencies 
+        self.dependencies = init_dependencies(dependencies)
 
     def __call__(self):
         """
@@ -770,6 +767,10 @@ class _InjectableFuncWrapper(object):
         (or until manually cleared). 'iteration' caches data for each
         complete iteration of the pipeline, 'step' caches data for
         a single step of the pipeline. 'dtree' uses a dependencies graph.
+    dependencies: list, optional
+        List of explicit dependencies (columns, tables, injectables)
+        to be used if cache_scope = 'dtree'. Columns are of the form 
+        'table.column_name'.
 
     Attributes
     ----------
@@ -785,15 +786,9 @@ class _InjectableFuncWrapper(object):
         self._argspec = getargspec(func)
         self.cache = cache
         self.cache_scope = cache_scope
-        self.dependencies = {}
-        for dep in dependencies:            
-            if is_expression(dep):
-                key = tuple(dep.split(".")) # convert into a tuple (dataset, column_name)
-            else:
-                key = dep
-            # initialize list of recorded versions with -1
-            self.dependencies[key] = -1
-        self.version = 0        
+        self.version = 0
+        # dict that records last seen versions of the dependencies 
+        self.dependencies = init_dependencies(dependencies)
 
     def __call__(self):
         use_cached = _CACHING and self.cache and self.name in _INJECTABLE_CACHE
@@ -2185,7 +2180,8 @@ def increment_node_version(key):
     node.version = node.version + 1
 
 def get_deptree_node(key):
-    class _FakeNode(object):
+    class _MockNode(object):
+        # need to have this for the case when the object is not a wrapper class
         def __init__(self, name):
             self.name = name
             self.dependencies = {}
@@ -2195,9 +2191,18 @@ def get_deptree_node(key):
         if key in d.keys():
             if isinstance(d[key], (_ColumnFuncWrapper, _InjectableFuncWrapper, TableFuncWrapper, _LocalSeriesWrapper, _SeriesWrapper)):
                 return d[key]
-            return _FakeNode(key)
+            return _MockNode(key)
     return None
 
 def record_versions_of_dependents(obj):
     for key, _ in obj.dependencies.iteritems():
         obj.dependencies[key] = get_deptree_node(key).version
+
+def init_dependencies(dependencies):
+    deps = {} 
+    for dep in dependencies:
+        key = dep
+        if is_expression(key): # convert into a tuple (table, column_name)
+            key = tuple(key.split(".")) 
+        deps[key] = -1 
+    return deps
