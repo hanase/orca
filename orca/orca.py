@@ -1024,7 +1024,7 @@ def _collect_variables(names, expressions=None):
 
 def add_table(
         table_name, table, cache=False, cache_scope=_CS_FOREVER,
-        copy_col=True):
+        copy_col=True, **kwargs):
     """
     Register a table with Orca.
 
@@ -1055,7 +1055,7 @@ def add_table(
     """
     if isinstance(table, Callable):
         table = TableFuncWrapper(table_name, table, cache=cache,
-                                 cache_scope=cache_scope, copy_col=copy_col)
+                                 cache_scope=cache_scope, copy_col=copy_col, **kwargs)
     else:
         table = DataFrameWrapper(table_name, table, copy_col=copy_col)
 
@@ -1069,7 +1069,7 @@ def add_table(
 
 
 def table(
-        table_name=None, cache=False, cache_scope=_CS_FOREVER, copy_col=True):
+        table_name=None, cache=False, cache_scope=_CS_FOREVER, copy_col=True, **kwargs):
     """
     Decorates functions that return DataFrames.
 
@@ -1090,7 +1090,7 @@ def table(
             name = func.__name__
         add_table(
             name, func, cache=cache, cache_scope=cache_scope,
-            copy_col=copy_col)
+            copy_col=copy_col, **kwargs)
         return func
     return decorator
 
@@ -1366,7 +1366,7 @@ def _memoize_function(f, name, cache_scope=_CS_FOREVER):
 
 def add_injectable(
         name, value, autocall=True, cache=False, cache_scope=_CS_FOREVER,
-        memoize=False):
+        memoize=False, **kwargs):
     """
     Add a value that will be injected into other functions.
 
@@ -1403,7 +1403,7 @@ def add_injectable(
     if isinstance(value, Callable):
         if autocall:
             value = _InjectableFuncWrapper(
-                name, value, cache=cache, cache_scope=cache_scope)
+                name, value, cache=cache, cache_scope=cache_scope, **kwargs)
             # clear any cached data from a previously registered value
             value.clear_cached()
         elif not autocall and memoize:
@@ -1415,7 +1415,7 @@ def add_injectable(
 
 def injectable(
         name=None, autocall=True, cache=False, cache_scope=_CS_FOREVER,
-        memoize=False):
+        memoize=False, **kwargs):
     """
     Decorates functions that will be injected into other functions.
 
@@ -1436,7 +1436,7 @@ def injectable(
             n = func.__name__
         add_injectable(
             n, func, autocall=autocall, cache=cache, cache_scope=cache_scope,
-            memoize=memoize)
+            memoize=memoize, **kwargs)
         return func
     return decorator
 
@@ -2185,9 +2185,17 @@ def increment_node_version(key):
     node.version = node.version + 1
 
 def get_deptree_node(key):
+    class _FakeNode(object):
+        def __init__(self, name):
+            self.name = name
+            self.dependencies = {}
+            self.version = 0
+            
     for d in (_LOCAL_COLUMNS, _COLUMNS, _TABLES, _INJECTABLES):
         if key in d.keys():
-            return d[key]
+            if isinstance(d[key], (_ColumnFuncWrapper, _InjectableFuncWrapper, TableFuncWrapper, _LocalSeriesWrapper, _SeriesWrapper)):
+                return d[key]
+            return _FakeNode(key)
     return None
 
 def record_versions_of_dependents(obj):

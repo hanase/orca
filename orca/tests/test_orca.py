@@ -338,14 +338,16 @@ def test_column_dtree_cache(df):
         return orca.get_table("table1").b + orca.get_table("table2").x.sum()
     
     @orca.column('table1', 'd', cache = True, cache_scope = 'dtree',
-                 dependencies = ['table1.b', 'table2.y'
-                                 #, 'inj1'
-                                 ])
+                 dependencies = ['table1.b', 'table2.y', 'inj'])
     def d():
-        return orca.get_table("table1").b + orca.get_table("table2").y.sum()    
+        return orca.get_table("table1").b + orca.get_table("table2").y.sum() + orca.get_injectable("inj").sum()
     
+    @orca.injectable('inj', cache=True, cache_scope='dtree', dependencies = ["table1.a"])
+    def inj():
+        return orca.get_table("table1").a*50
+        
     tbl1 = orca.get_table("table1")
-    orca.add_injectable('inj1', -10)
+    tbl2 = orca.get_table("table2")
     
     # first call
     first_c = tbl1.c
@@ -353,13 +355,14 @@ def test_column_dtree_cache(df):
     pdt.assert_series_equal(first_c, series + 100, check_names = False)
     assert orca.get_raw_column('table1', 'c').version == 1
     
-    # second call
+    # second call (no change to first call)
     second_c = tbl1.c
+    second_d = tbl1.d
     pdt.assert_series_equal(first_c, second_c)
     assert orca.get_raw_column('table1', 'c').version == 1 # no recomputing happened
+    assert orca.get_raw_column('table1', 'd').version == 1
     
-    # make change in dependency using update_col
-    tbl2 = orca.get_table("table2")
+    # make change in dependency of table1.c using update_col    
     tbl2.update_col('x', tbl2.x * 2)
     
     # third call
@@ -367,11 +370,13 @@ def test_column_dtree_cache(df):
     pdt.assert_series_equal(third_c, series + 200, check_names = False)
     assert orca.get_raw_column('table1', 'c').version == 2 # values of c recomputed
     assert orca.get_raw_column('table1', 'd').version == 1 # but not d 
+    assert orca.get_raw_injectable('inj').version == 1 # and not injectable
     
-    # make change in dependency using update_col_from_series
-    tbl2.update_col_from_series('y', tbl2.y * 2)
-    pdt.assert_series_equal(tbl1.d, series + 2000, check_names = False)
+    # make change in dependency of table1.d using update_col_from_series
+    tbl1.update_col_from_series('a', tbl1.a * 2)
+    pdt.assert_series_equal(tbl1.d, series + 1600, check_names = False)
     assert orca.get_raw_column('table1', 'd').version == 2 # values of d recomputed
+    assert orca.get_raw_injectable('inj').version == 2 # as well as injectable
     assert orca.get_raw_column('table1', 'c').version == 2 # but not c
     
 def test_column_cache_disabled(df):
