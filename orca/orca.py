@@ -33,7 +33,6 @@ _STEPS = {}
 _BROADCASTS = {}
 _INJECTABLES = {}
 
-_USE_VERSIONING = True
 _CACHING = True
 _TABLE_CACHE = {}
 _COLUMN_CACHE = {}
@@ -43,6 +42,7 @@ _MEMOIZED = {}
 _CS_FOREVER = 'forever'
 _CS_ITER = 'iteration'
 _CS_STEP = 'step'
+_CS_DTREE = 'dtree'
 
 CacheItem = namedtuple('CacheItem', ['name', 'value', 'scope'])
 
@@ -255,6 +255,7 @@ class DataFrameWrapper(object):
         logger.debug('updating column {!r} in table {!r}'.format(
             column_name, self.name))
         self.local[column_name] = series
+        self.increment_version(column_name)
 
     def __setitem__(self, key, value):
         return self.update_col(key, value)
@@ -353,11 +354,7 @@ class DataFrameWrapper(object):
                 raise ValueError(err_msg)
 
         self.local.loc[series.index, column_name] = series
-        key = (self.name, column_name)
-        if key in _LOCAL_COLUMNS.keys():
-            _LOCAL_COLUMNS[key].version = _LOCAL_COLUMNS[key].version + 1
-        else:
-            _COLUMNS[key].version = _COLUMNS[key] + 1
+        self.increment_version(column_name)
 
     def __len__(self):
         return len(self.local)
@@ -372,6 +369,12 @@ class DataFrameWrapper(object):
             col.clear_cached()
         logger.debug('cleared cached columns for table {!r}'.format(self.name))
 
+    def increment_version(self, column_name):
+        key = (self.name, column_name)
+        if key in _LOCAL_COLUMNS.keys():
+            _LOCAL_COLUMNS[key].version = _LOCAL_COLUMNS[key].version + 1
+        else:
+            _COLUMNS[key].version = _COLUMNS[key] + 1        
 
 class TableFuncWrapper(object):
     """
@@ -601,11 +604,11 @@ class _ColumnFuncWrapper(object):
         index matching the table to which it is being added.
     cache : bool, optional
         Whether to cache the result of calling the wrapped function.
-    cache_scope : {'step', 'iteration', 'forever'}, optional
+    cache_scope : {'step', 'iteration', 'forever', 'dtree'}, optional
         Scope for which to cache data. Default is to cache forever
         (or until manually cleared). 'iteration' caches data for each
         complete iteration of the pipeline, 'step' caches data for
-        a single step of the pipeline.
+        a single step of the pipeline. 'dtree' uses a dependencies graph.
 
     Attributes
     ----------
@@ -628,7 +631,13 @@ class _ColumnFuncWrapper(object):
         self.cache_scope = cache_scope
         self.dependencies = {}
         for dep in dependencies:
-            self.dependencies[dep] = -1
+            # convert into a tuple (dataset, column_name)
+            if not is_expression(dep):
+                raise TypeError("dependencies for {}.{} should be of type 'dataset.column_name', but it is {!r}".format(
+                    self.table_name, self.name, dep))
+            key = tuple(dep.split("."))
+            # initialize list of recorded version with -1
+            self.dependencies[key] = -1
         self.version = 0
 
     def __call__(self):
@@ -639,10 +648,9 @@ class _ColumnFuncWrapper(object):
         use_cached = (_CACHING and
                 self.cache and
                 (self.table_name, self.name) in _COLUMN_CACHE)
-        if _USE_VERSIONING:
-            use_cached = use_cached and (not need_to_recompute(
-                    self.dependencies))
-
+        if self.cache_scope == _CS_DTREE:
+            use_cached = use_cached and (not need_to_recompute(self.dependencies))             
+        
         if use_cached:
             logger.debug(
                 'returning column {!r} for table {!r} from cache'.format(
@@ -655,15 +663,15 @@ class _ColumnFuncWrapper(object):
             kwargs = _collect_variables(names=self._argspec.args,
                                         expressions=self._argspec.defaults)
             col = self._func(**kwargs)
-            if _USE_VERSIONING:
-                self.version = self.version + 1
-                logger.debug("Version for {!r}.{!r}: {!r}".format(self.table_name, self.name, self.version))
-                for key, version in self.dependencies.iteritems():
-                    if key in _LOCAL_COLUMNS.keys():
-                        depcol = _LOCAL_COLUMNS[key]
-                    else:
-                        depcol = _COLUMNS[key]
-                    self.dependencies[key] = depcol.version
+            # increase version and record versions of dependents
+            self.version = self.version + 1
+            logger.debug("Version for {!r}.{!r}: {!r}".format(self.table_name, self.name, self.version))
+            for key, version in self.dependencies.iteritems():
+                if key in _LOCAL_COLUMNS.keys():
+                    depcol = _LOCAL_COLUMNS[key]
+                else:
+                    depcol = _COLUMNS[key]
+                self.dependencies[key] = depcol.version
 
         if self.cache:
             _COLUMN_CACHE[(self.table_name, self.name)] = CacheItem(
@@ -753,11 +761,11 @@ class _InjectableFuncWrapper(object):
     func : callable
     cache : bool, optional
         Whether to cache the result of calling the wrapped function.
-    cache_scope : {'step', 'iteration', 'forever'}, optional
+    cache_scope : {'step', 'iteration', 'forever', 'dtree'}, optional
         Scope for which to cache data. Default is to cache forever
         (or until manually cleared). 'iteration' caches data for each
         complete iteration of the pipeline, 'step' caches data for
-        a single step of the pipeline.
+        a single step of the pipeline. 'dtree' uses a dependencies graph.
 
     Attributes
     ----------
@@ -2131,6 +2139,20 @@ def eval_step(name, **kwargs):
         return get_step(name)()
 
 def need_to_recompute(deps):
+    """
+    Recursively traverses the tree and returns True if any of the recorded versions 
+    of the dependencies is smaller than the actual version of that node. Otherwise False.
+    
+    Parameters
+    ----------
+    deps : list
+        Dictionary of the form {(dataset, column_name): version}
+        
+    Returns
+    -------
+    logical
+    
+    """
     recompute = False
     for key, version in deps.iteritems():
         if key in _LOCAL_COLUMNS.keys():

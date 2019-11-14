@@ -322,7 +322,55 @@ def test_column_cache(df):
     orca.add_column(*key, column=column, cache=True)
     pdt.assert_series_equal(c()(), series * 6)
 
-
+def test_column_dtree_cache(df):
+    series = pd.Series([4, 5, 6], index=['x', 'y', 'z'])
+                       
+    orca.add_table('table1', df)
+    orca.add_table('table2', 
+                   pd.DataFrame(
+                       [[10, 100], [20, 200], [30, 300], [40, 400]], columns=['x', 'y'],
+                       index=['aa', 'bb', 'cc', 'dd'])
+                   )
+    
+    @orca.column('table1', 'c', cache = True, cache_scope = 'dtree',
+                 dependencies = ['table1.b', 'table2.x'])
+    def c():
+        return orca.get_table("table1").b + orca.get_table("table2").x.sum()
+    
+    @orca.column('table1', 'd', cache = True, cache_scope = 'dtree',
+                 dependencies = ['table1.b', 'table2.y'])
+    def d():
+        return orca.get_table("table1").b + orca.get_table("table2").y.sum()    
+    
+    tbl1 = orca.get_table("table1")
+    
+    # first call
+    first_c = tbl1.c
+    first_d = tbl1.d
+    pdt.assert_series_equal(first_c, series + 100, check_names = False)
+    assert orca.get_raw_column('table1', 'c').version == 1
+    
+    # second call
+    second_c = tbl1.c
+    pdt.assert_series_equal(first_c, second_c)
+    assert orca.get_raw_column('table1', 'c').version == 1 # no recomputing happened
+    
+    # make change in dependency using update_col
+    tbl2 = orca.get_table("table2")
+    tbl2.update_col('x', tbl2.x * 2)
+    
+    # third call
+    third_c = tbl1.c
+    pdt.assert_series_equal(third_c, series + 200, check_names = False)
+    assert orca.get_raw_column('table1', 'c').version == 2 # values of c recomputed
+    assert orca.get_raw_column('table1', 'd').version == 1 # but not d 
+    
+    # make change in dependency using update_col_from_series
+    tbl2.update_col_from_series('y', tbl2.y * 2)
+    pdt.assert_series_equal(tbl1.d, series + 2000, check_names = False)
+    assert orca.get_raw_column('table1', 'd').version == 2 # values of d recomputed
+    assert orca.get_raw_column('table1', 'c').version == 2 # but not c
+    
 def test_column_cache_disabled(df):
     orca.add_injectable('x', 2)
     series = pd.Series([1, 2, 3], index=['x', 'y', 'z'])
@@ -876,6 +924,8 @@ def test_cache_scope(df):
         orca.add_injectable('iterations', iterations + 1)
 
     orca.run(['m1', 'm2'], iter_vars=[1000, 2000])
+
+
 
 
 def test_table_func_local_cols(df):
